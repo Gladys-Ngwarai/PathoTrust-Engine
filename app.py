@@ -9,7 +9,23 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from io import BytesIO
+from datetime import datetime
 
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    Image as PDFImage,
+    PageBreak,
+)
 from datasets import load_dataset
 from PIL import Image, ImageEnhance
 from sklearn.metrics import (
@@ -1853,6 +1869,394 @@ def pathobot_floating():
 
 
 # =========================================================
+# COMBINED PDF REPORT — PATHOTRUST ENGINE
+# =========================================================
+
+def build_combined_report():
+    buffer = BytesIO()
+
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=40,
+        leftMargin=40,
+        topMargin=45,
+        bottomMargin=40,
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#172554"),
+        fontSize=22,
+        spaceAfter=8,
+    )
+
+    heading_style = ParagraphStyle(
+        "ReportHeading",
+        parent=styles["Heading2"],
+        textColor=colors.HexColor("#283593"),
+        spaceBefore=16,
+        spaceAfter=8,
+    )
+
+    body_style = styles["BodyText"]
+
+    story = []
+
+    def add_table(rows):
+        table = Table(rows, colWidths=[3.0 * inch, 3.5 * inch])
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#243B70")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F1F5F9")),
+            ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#172554")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+            ("PADDING", (0, 0), (-1, -1), 7),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 12))
+
+    def add_figure(fig, width=6.2 * inch):
+        image_buffer = BytesIO()
+        fig.savefig(
+            image_buffer,
+            format="png",
+            dpi=150,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+        image_buffer.seek(0)
+
+        story.append(
+            PDFImage(
+                image_buffer,
+                width=width,
+                height=width * 0.62,
+            )
+        )
+        story.append(Spacer(1, 12))
+
+    story.append(Paragraph("PathoTrust Engine", title_style))
+    story.append(Paragraph(
+        "Combined Histopathology Analysis Report",
+        ParagraphStyle(
+            "Subtitle",
+            parent=body_style,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#64748B"),
+        ),
+    ))
+
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph(
+        f"Report generated: {datetime.now().strftime('%d %B %Y, %H:%M')}",
+        body_style,
+    ))
+
+    active = get_active()
+
+    if active is not None:
+        story.append(Paragraph("Selected Image", heading_style))
+        story.append(Paragraph(
+            f"Image name: {active['name']}",
+            body_style,
+        ))
+        story.append(Paragraph(
+            f"Image source: {active['source']}",
+            body_style,
+        ))
+
+        image_buffer = BytesIO()
+        active["image"].convert("RGB").save(
+            image_buffer,
+            format="JPEG",
+        )
+        image_buffer.seek(0)
+
+        story.append(PDFImage(
+            image_buffer,
+            width=3.5 * inch,
+            height=2.8 * inch,
+        ))
+        story.append(Spacer(1, 12))
+
+    # -----------------------------------------------------
+    # TUMORSPOT
+    # -----------------------------------------------------
+
+    story.append(Paragraph("1. TumorSpot — Classification", heading_style))
+
+    tumor = st.session_state.get("last_result")
+
+    if tumor:
+        rows = [["Prediction", "Model score"]]
+
+        for name, score in tumor["topk"]:
+            rows.append([name, f"{score * 100:.2f}%"])
+
+        add_table(rows)
+
+        story.append(Paragraph(
+            "The displayed percentages are model output scores, "
+            "not calibrated probabilities or diagnostic certainty.",
+            body_style,
+        ))
+    else:
+        story.append(Paragraph(
+            "TumorSpot was not run during this session.",
+            body_style,
+        ))
+
+    # -----------------------------------------------------
+    # STAINSHIFT
+    # -----------------------------------------------------
+
+    story.append(Paragraph(
+        "2. StainShift — Robustness Analysis",
+        heading_style,
+    ))
+
+    stain = st.session_state.get("stain_results")
+
+    if stain:
+        story.append(Paragraph(
+            f"Original prediction: {stain['original_class']}",
+            body_style,
+        ))
+        story.append(Paragraph(
+            f"Original model score: {stain['original_score'] * 100:.2f}%",
+            body_style,
+        ))
+        story.append(Spacer(1, 8))
+
+        rows = [[
+            "Image variation",
+            "Predicted category",
+            "Score",
+            "Same prediction?",
+        ]]
+
+        for item in stain["results"]:
+            rows.append([
+                item["variation"],
+                item["predicted_class"],
+                f"{item['original_class_score'] * 100:.2f}%",
+                "Yes" if item["same_class"] else "No",
+            ])
+
+        table = Table(rows, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#243B70")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F1F5F9")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("PADDING", (0, 0), (-1, -1), 5),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 12))
+
+        labels = [item["variation"] for item in stain["results"]]
+        scores = [
+            item["original_class_score"] * 100
+            for item in stain["results"]
+        ]
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.bar(range(len(labels)), scores)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+        ax.set_ylabel("Original predicted-class score (%)")
+        ax.set_ylim(0, 105)
+        ax.set_title("StainShift Score Comparison")
+        ax.grid(axis="y", alpha=0.2)
+        fig.tight_layout()
+
+        add_figure(fig)
+
+    else:
+        story.append(Paragraph(
+            "StainShift was not run during this session.",
+            body_style,
+        ))
+
+    # -----------------------------------------------------
+    # HEATMAPTRUST
+    # -----------------------------------------------------
+
+    story.append(Paragraph(
+        "3. HeatmapTrust — Model Sensitivity",
+        heading_style,
+    ))
+
+    heat = st.session_state.get("heatmap_results")
+
+    if heat:
+        story.append(Paragraph(
+            f"Target prediction: {heat['target_class']}",
+            body_style,
+        ))
+        story.append(Paragraph(
+            f"Baseline model score: {heat['baseline_score'] * 100:.2f}%",
+            body_style,
+        ))
+        story.append(Paragraph(
+            f"Patch grid: {heat['grid_size']} × {heat['grid_size']}",
+            body_style,
+        ))
+        story.append(Spacer(1, 8))
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        ax.imshow(heat["original_image"])
+        overlay = ax.imshow(
+            heat["heatmap"],
+            cmap="turbo",
+            alpha=HEATMAP_OVERLAY_ALPHA,
+            vmin=0,
+            vmax=1,
+            interpolation="bilinear",
+        )
+        ax.set_title("HeatmapTrust — Model Sensitivity Overlay")
+        ax.axis("off")
+        fig.colorbar(overlay, ax=ax, label="Relative influence")
+        fig.tight_layout()
+
+        add_figure(fig)
+
+        story.append(Paragraph(
+            "Warmer regions indicate areas where masking a patch "
+            "caused a larger reduction in the target-class score. "
+            "This measures model sensitivity, not biological importance.",
+            body_style,
+        ))
+
+    else:
+        story.append(Paragraph(
+            "HeatmapTrust was not run during this session.",
+            body_style,
+        ))
+
+    # -----------------------------------------------------
+    # HONESTPATH
+    # -----------------------------------------------------
+
+    story.append(Paragraph(
+        "4. HonestPath — Model Evaluation",
+        heading_style,
+    ))
+
+    honest = st.session_state.get("honestpath_results")
+
+    if honest:
+        rows = [
+            ["Evaluation metric", "Result"],
+            ["Top-1 accuracy", f"{honest['accuracy'] * 100:.2f}%"],
+            ["Top-3 accuracy", f"{honest['top3'] * 100:.2f}%"],
+            ["Macro precision", f"{honest['macro_precision']:.4f}"],
+            ["Macro recall", f"{honest['macro_recall']:.4f}"],
+            ["Macro F1", f"{honest['macro_f1']:.4f}"],
+            ["Total test images", str(honest["total_images"])],
+        ]
+
+        add_table(rows)
+
+        fig, ax = plt.subplots(figsize=(9, 7))
+        plot = ax.imshow(
+            honest["confusion_matrix"],
+            interpolation="nearest",
+            aspect="auto",
+            cmap="Blues",
+        )
+
+        names = honest["class_names"]
+
+        ax.set_title("HonestPath Confusion Matrix")
+        ax.set_xlabel("Predicted category")
+        ax.set_ylabel("Actual category")
+        ax.set_xticks(range(len(names)))
+        ax.set_yticks(range(len(names)))
+        ax.set_xticklabels(names, rotation=90, fontsize=5)
+        ax.set_yticklabels(names, fontsize=5)
+
+        fig.colorbar(plot, ax=ax)
+        fig.tight_layout()
+
+        add_figure(fig)
+
+    else:
+        story.append(Paragraph(
+            "HonestPath evaluation was not run during this session.",
+            body_style,
+        ))
+
+    # -----------------------------------------------------
+    # LIMITATIONS
+    # -----------------------------------------------------
+
+    story.append(Paragraph(
+        "5. Interpretation and Limitations",
+        heading_style,
+    ))
+
+    story.append(Paragraph(
+        "PathoTrust Engine is a research prototype. It has not been "
+        "clinically validated and must not be used to diagnose patients "
+        "or guide treatment. Model scores are not calibrated probabilities. "
+        "Heatmaps show model sensitivity, not proof of biological reasoning. "
+        "Performance depends on the dataset and evaluation design.",
+        body_style,
+    ))
+
+    story.append(Spacer(1, 18))
+
+    story.append(Paragraph(
+        "PathoTrust Engine — Detect the tumour. Challenge the evidence. "
+        "Evaluate the model honestly.",
+        ParagraphStyle(
+            "FooterText",
+            parent=body_style,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#64748B"),
+            fontSize=9,
+        ),
+    ))
+
+    document.build(story)
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def combined_report_download():
+    has_results = any([
+        st.session_state.get("last_result"),
+        st.session_state.get("stain_results"),
+        st.session_state.get("heatmap_results"),
+        st.session_state.get("honestpath_results"),
+    ])
+
+    if has_results:
+        st.download_button(
+            label="📄 Download Combined PDF Report",
+            data=build_combined_report(),
+            file_name="PathoTrust_Combined_Report.pdf",
+            mime="application/pdf",
+            key="combined_pdf_download",
+            use_container_width=True,
+        )
+    else:
+        st.info(
+            "Run at least one analysis module before downloading a report."
+        )
+
+# =========================================================
 # THEME AND CUSTOM CSS
 # =========================================================
 
@@ -2078,7 +2482,11 @@ with st.sidebar:
 
     st.caption("Research prototype only.")
     st.caption("Not for clinical diagnosis.")
+    
+    st.divider()
 
+    st.markdown("**📑 Export Results**")
+    combined_report_download()
 
 pathobot_floating()
 
