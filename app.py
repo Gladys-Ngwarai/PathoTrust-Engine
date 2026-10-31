@@ -1282,7 +1282,7 @@ def evaluate_honestpath():
             groups[label][:TEST_IMAGES_PER_CLASS]
         )
 
-    batch_size = 32
+    batch_size = 64
 
     total_batches = (
         len(chosen) + batch_size - 1
